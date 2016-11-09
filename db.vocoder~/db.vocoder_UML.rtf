@@ -1,0 +1,114 @@
+{\rtf1\ansi\ansicpg1252\cocoartf1348\cocoasubrtf170
+{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+\margl1440\margr1440\vieww18660\viewh14180\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural
+
+\f0\b\fs24 \cf0 typedef struct _vocoder \{\
+	
+\b0 t_pxobject ob;\
+	double samplerate;\
+	int numBands;				//ATTR: \'93nums\'94\
+	double delayTime, envAttack, envRelease;\
+	double *delayHistory;\
+	long delayCount;\
+	int isEnvelopeActive;\
+	struct BPFilter *modFB;\
+	struct BPFilter *carrFB;\
+	struct BandParams *bandParams;\
+	void *envList_outlet;\
+
+\b \};\
+\
+\
+struct BPFilter \{\
+	
+\b0 double freq, bw, gain;\
+	double x1, x2, y1, y2;\
+	double coefs[];\
+
+\b \};
+\b0 \
+\
+\
+
+\b struct BandParams \{\
+	
+\b0 double pan, delay/*? index time*/; \
+	double envY, envStart, envTarget;\
+	long envCount;\
+
+\b \};\
+
+\b0 \
+\
+
+\b //Message Functions\
+
+\b0 void \'93delay\'94(A_DEFFLOAT);\
+void \'93env\'94(A_GIMME);\
+void \'93freqs\'94(A_GIMME);\
+void \'93pans\'94(A_GIMME);\
+void \'93gains\'94(A_GIMME);\
+void \'93bandwidths\'94(A_GIMME);\
+void \'93clear\'94(A_GIMME);\
+t_max_err \'93notify\'94(A_CANT);	//\'93num\'94 : numBands\
+\
+\
+
+\b //Standard Functions\
+
+\b0 void *vocoder_new(\'85);\
+void vocoder_free(t_vocoder *x);\
+void vocoder_assist(\'85);\
+\
+\
+
+\b //Internal Functions\
+
+\b0 void vocoder_initNullParams(t_vocoder *x);
+\b \
+
+\b0 void vocoder_numBands(t_vocoder *x);\
+void vocoder_envSetTarget(struct BandParams *params, double target);\
+void vocoder_envListOut(t_vocoder *x, double *envList);\
+\
+\
+
+\b //DSP Functions\
+
+\b0 void vocoder_dsp64(\'85);
+\b \
+
+\b0 void vocoder_perform64(\'85);\
+double *vocoder_vocoder(struct BPFilter *modFB, struct BPFilter *carrFB, int bands, struct BandParams *params, t_double modulator, t_double carrier);
+\b \
+
+\b0 double vocoder_bpf(struct BPFilter filter, t_double in);\
+double vocoder_envelopeFollow(int isActive, double in, double attack, double release, long *count, double start, double target);\
+double vocoder_delay(double in, long delayTime, double *history, long delayCount);\
+\
+\
+\
+\
+\
+
+\b /* NOTES\
+
+\i\b0 Generic outlet\
+
+\i0 void *my_outlet			//In object struct
+\b \
+\pard\pardeftab720
+
+\b0 \cf0 x->my_outlet = outlet_new((t_object *)x, NULL);	//In new\
+outlet_anything(x->my_outlet, myArray);			//In a function\
+
+\i Or use list\
+
+\i0 x->my_outlet = listout(void * x);\
+void* outlet_list(x->my_outlet, t_symbol * s,short ac, t_atom * av );\
+Outlets and inlets are created from right to left
+\b \
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural
+\cf0 */}

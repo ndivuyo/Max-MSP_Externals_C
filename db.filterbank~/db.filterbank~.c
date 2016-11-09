@@ -17,17 +17,19 @@ const int NUM_COEFS = 4;
 
 //BP filter
 struct BPFilter {
-	double centerFreq, bandwidth, gain, pan;
-	double x1, x2, y1, y2;
-	double coefs[NUM_COEFS];
+	double centerFreq, bandwidth, gain, pan;		//Parameters
+	double x1, x2, y1, y2;							//Delay History
+	double coefs[NUM_COEFS];						//Coefficients
 };
 
 //Object Struct
 typedef struct _filterbank {
 	t_pxobject ob;
-	int numFilters;
-	struct BPFilter *filterbank;
-	double level;
+	int numFilters;					//(Attribute: num) Number of filters
+	int numFiltersActive;
+	struct BPFilter *filterbank;	//Array of BPFilters
+	double level;					//Master gain for filterbank
+	double samplerate;
 } t_filterbank;
 
 
@@ -45,10 +47,11 @@ void filterbank_gains(t_filterbank *x, t_symbol *s, long argc, t_atom *argv);
 void filterbank_pans(t_filterbank *x, t_symbol *s, long argc, t_atom *argv);
 void filterbank_bandwidths(t_filterbank *x, t_symbol *s, long argc, t_atom *argv);
 void filterbank_level(t_filterbank *x, double level);
-void filterbank_num(t_filterbank *x, int num);
+void filterbank_clear(t_filterbank *x);
 void filterbank_computeCoefs(t_filterbank *x);
 void filterbank_initParams(t_filterbank *x);
-double *filterbank_filterInput(t_filterbank *x, t_double in);
+double *filterbank_bpFilterbankStereo(struct BPFilter *filters, int size, t_double in);
+t_max_err filterbank_notify(t_filterbank *x, t_symbol *s, t_symbol *msg, void *sender, void *data);
 
 
 // global class pointer variable
@@ -56,23 +59,27 @@ static t_class *filterbank_class = NULL;
 
 
 
-//***********************************************************************************************
+/*  Main   	***********************************************************************************************/
 
 
 
+//Main
 void ext_main(void *r)
 {
 	t_class *c = class_new("db.filterbank~", (method)filterbank_new, (method)dsp_free, (long)sizeof(t_filterbank), 0L, A_GIMME, 0);
 	//
 	class_addmethod(c, (method)filterbank_dsp64, "dsp64",	A_CANT, 0);
 	class_addmethod(c, (method)filterbank_assist, "assist",	A_CANT, 0);
+	class_addmethod(c, (method)filterbank_notify, "notify", A_CANT, 0);
 	//
 	class_addmethod(c, (method)filterbank_freqs, "freqs", A_GIMME, 0);
 	class_addmethod(c, (method)filterbank_gains, "gains", A_GIMME, 0);
 	class_addmethod(c, (method)filterbank_pans, "pans", A_GIMME, 0);
 	class_addmethod(c, (method)filterbank_bandwidths, "bandwidths", A_GIMME, 0);
 	class_addmethod(c, (method)filterbank_level, "level", A_FLOAT, 0);
-	class_addmethod(c, (method)filterbank_num, "num", A_LONG, 0);
+	class_addmethod(c, (method)filterbank_clear, "clear", A_GIMME, 0);
+	//
+	CLASS_ATTR_LONG(c, "num", 0, t_filterbank, numFilters);
 	//
 	class_dspinit(c);
 	class_register(CLASS_BOX, c);
@@ -85,6 +92,17 @@ void ext_main(void *r)
 
 
 
+//Min and Max functions
+#define max(a,b) \
+   ({ __typeof__ (a) _a = (a); \
+       __typeof__ (b) _b = (b); \
+     _a > _b ? _a : _b; })
+#define min(a,b) \
+   ({ __typeof__ (a) _a = (a); \
+       __typeof__ (b) _b = (b); \
+     _a < _b ? _a : _b; })
+
+
 //new
 void *filterbank_new(t_symbol *s, long argc, t_atom *argv)
 {
@@ -95,13 +113,18 @@ void *filterbank_new(t_symbol *s, long argc, t_atom *argv)
 		//2 Signal Outs
 		outlet_new((t_pxobject *)x, "signal");
 		outlet_new((t_pxobject *)x, "signal");
+		//Register object (attach to itsself) so get attr notifications
+		object_attach_byptr_register(x, x, CLASS_BOX);
+		//Get samplerate
+		x->samplerate = sys_getsr();
+		x->numFiltersActive = 0;
 		//Check for arguments
 		if (atom_getlong(argv))
-			x->numFilters = atom_getlong(argv);
+			x->numFilters = max( atom_getlong(argv), 0);
 		else
 			x->numFilters = 1;
-		if (atom_getlong(++argv))
-			x->level = atom_getlong(argv);
+		if (atom_getfloat(++argv))
+			x->level = max( atom_getlong(argv), 0);
 		else
 			x->level = 1;
 		//Allocate memory for filterbank
@@ -145,34 +168,45 @@ void filterbank_assist(t_filterbank *x, void *b, long m, long a, char *s)
 
 
 
-//Min and Max functions
-#define max(a,b) \
-   ({ __typeof__ (a) _a = (a); \
-       __typeof__ (b) _b = (b); \
-     _a > _b ? _a : _b; })
-#define min(a,b) \
-   ({ __typeof__ (a) _a = (a); \
-       __typeof__ (b) _b = (b); \
-     _a < _b ? _a : _b; })
+//Notify (Changed attributes)
+t_max_err filterbank_notify(t_filterbank *x, t_symbol *s, t_symbol *msg, void *sender, void *data)
+{
+    t_symbol *attrname;
+    if (msg == gensym("attr_modified")) {   // Check notification type
+        attrname = (t_symbol *)object_method((t_object *)data, gensym("getname")); // ask attribute object for name
+        
+        //Number of filters changed
+        if (attrname == gensym("num")) {
+			//Reallocate memory for array of bandpass
+			x->filterbank = (struct BPFilter *)realloc(x->filterbank, x->numFilters * sizeof(struct BPFilter));
+			//Initialize parameter values that are empty
+			filterbank_initParams(x);
+        }
+        //
+
+    }
+    return 0;
+}
 
 
-//Initial parameter values
+//Initialize empty parameter values
 void filterbank_initParams(t_filterbank *x) 
 {
 	int size = x->numFilters;
     struct BPFilter *filters = x->filterbank;
-    for (int i = 0; i < size; i++, filters++) {
-    	if (!filters->centerFreq)
-    		filters->centerFreq = 1000;
-    	if (!filters->gain)
-    		filters->gain = 1;
-    	if (!filters->pan)
-    		filters->pan = 0.5;
-    	if (!filters->bandwidth)
-    		filters->bandwidth = 1;
-    	post("%ld, %.2f, %.2f, %.2f", i, filters->centerFreq, filters->gain, filters->bandwidth);
+    for (int i = 0; i < size; i++) {
+    	//Determine if value previously set, if not use previous filter's parameters
+    	if (!filters[i].centerFreq)
+    		filters[i].centerFreq = !i? 1000 : filters[i - 1].centerFreq;
+    	if (!filters[i].gain)
+    		filters[i].gain = !i? 1 : filters[i - 1].gain;
+    	if (!filters[i].pan)
+    		filters[i].pan = !i? 0.5 : filters[i - 1].pan;
+    	if (!filters[i].bandwidth)
+    		filters[i].bandwidth = !i? 1 : filters[i - 1].bandwidth;
     }
     filterbank_computeCoefs(x);
+    x->numFiltersActive = x->numFilters;
 }
 
 
@@ -183,7 +217,7 @@ void filterbank_freqs(t_filterbank *x, t_symbol *s, long argc, t_atom *argv)
 	t_atom *args = argv;
     struct BPFilter *filters = x->filterbank;
     for (int i = 0; i < size; i++, args++, filters++) {
-    	filters->centerFreq = max( atom_getfloat(args), 20 );
+    	filters->centerFreq = max( min(atom_getfloat(args), x->samplerate / 2), 20 );
     }
     filterbank_computeCoefs(x);
 }
@@ -198,7 +232,6 @@ void filterbank_gains(t_filterbank *x, t_symbol *s, long argc, t_atom *argv)
     for (int i = 0; i < size; i++, args++, filters++) {
     	filters->gain = atom_getfloat(args);
     }
-    filterbank_computeCoefs(x);
 }
 
 
@@ -234,23 +267,13 @@ void filterbank_level(t_filterbank *x, double level)
 }
 
 
-//Change the number of filters
-void filterbank_num(t_filterbank *x, int num) {
-	x->numFilters = num;
-	//Reallocate memory for array of bandpass
-	x->filterbank = (struct BPFilter *)realloc(x->filterbank, x->numFilters * sizeof(struct BPFilter));
-	//Initialize parameter values that are empty
-	filterbank_initParams(x);
-}
-
-
 //Convert center frequency and bandwidth to coefficients for each filter
 void filterbank_computeCoefs(t_filterbank *x) 
 {
 	struct BPFilter *filters = x->filterbank;
 	for (int i = 0; i < x->numFilters; i++, filters++) {
 		//Conversions
-		double w = 2 * acos(-1) * filters->centerFreq / 44100;
+		double w = 2 * acos(-1) * filters->centerFreq / x->samplerate;
 		double a = sin(w) * sinh( (log(2) / 2) * filters->bandwidth * (w / sin(w)) );
 		double a0 = 1 + a;
 		double *coefs = filters->coefs;
@@ -261,6 +284,16 @@ void filterbank_computeCoefs(t_filterbank *x)
 	}
 }
 
+
+//Clear delay history if filter blows up
+void filterbank_clear(t_filterbank *x) 
+{
+	int size = x->numFilters;
+    struct BPFilter *filters = x->filterbank;
+    for (int i = 0; i < size; i++, filters++) {
+    	filters->x1 = filters->x2 = filters->y1 = filters->y2 = 0;
+    }
+}
 
 
 /*	DSP 	*******************************************************************/
@@ -281,31 +314,28 @@ void filterbank_perform64(t_filterbank *x, t_object *dsp64, double **ins, long n
 	t_double *in = ins[0];	
 	t_double *outL = outs[0];
 	t_double *outR = outs[1];
-	double *outs;
+	double *outX;
 
 	while (sampleframes--) {
-		//Filter input
-		outs = filterbank_filterInput(x, *in++);
-		*outL++ = *outs++;
-		*outR++ = *outs;
+		//Filterbank input
+		outX = filterbank_bpFilterbankStereo(x->filterbank, x->numFiltersActive, *in++);
+		*outL++ = *outX++ * x->level;
+		*outR++ = *outX * x->level;
 	}
 }
 
 
-//Implement BP filter on input signal
-double *filterbank_filterInput(t_filterbank *x, t_double in) 
+//Implement array of BP filter on input signal
+double *filterbank_bpFilterbankStereo(struct BPFilter *filters, int size, t_double in) 
 {
 	//Sum of all bp filters in bank
-	static double sums[2];
-	double sum = 0;
+	static double sums[2] = {0, 0};
 	//Iterate through each filter
-	struct BPFilter *filters = x->filterbank;
-	for (int i = 0; i < x->numFilters; i++, filters++) {
+	for (int i = 0; i < size; i++, filters++) {
 		double *coefs = filters->coefs;
 		double yTemp = filters->y1;
 		//Biquad filter
 		filters->y1 = *coefs * in + *(coefs + 1) * filters->x2 - *(coefs + 2) * filters->y1 - *(coefs + 3) * filters->y2;
-		filters->y1 *= filters->gain;
 		//NaN value correcting?
 #ifdef DENORM_WANT_FIX
 		if (IS_DENORM_NAN_DOUBLE(filters->y1))
@@ -319,13 +349,13 @@ double *filterbank_filterInput(t_filterbank *x, t_double in)
 		filters->y2 = yTemp;
 		filters->x2 = filters->x1;
 		filters->x1 = in;
-		//Add sample value to sum
-		sum += filters->y1;
+		//Add sample value to sum with gain and panning
+		sums[0] += filters->y1 * filters->gain * (1 - filters->pan);
+		sums[1] += filters->y1 * filters->gain * filters->pan;
 	}
-	//Gain adjustment and Panning L/R
-	sum *= (1 / sqrt(x->numFilters)) * x->level;
-	sums[1] = sum * filters->pan;
-	sums[0] = 1 - sums[1];
-	//Return sample value
+	//Gain adjustment
+	sums[0] *= (1 / sqrt(size));
+	sums[1] *= (1 / sqrt(size));
+	//add processed sample values
 	return sums;
 }
