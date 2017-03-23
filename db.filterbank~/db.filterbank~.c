@@ -26,7 +26,7 @@ struct BPFilter {
 typedef struct _filterbank {
 	t_pxobject ob;
 	int numFilters;					//(Attribute: num) Number of filters
-	int numFiltersActive;
+	int maxFilters;
 	struct BPFilter *filterbank;	//Array of BPFilters
 	double level;					//Master gain for filterbank
 	double samplerate;
@@ -47,11 +47,11 @@ void filterbank_gains(t_filterbank *x, t_symbol *s, long argc, t_atom *argv);
 void filterbank_pans(t_filterbank *x, t_symbol *s, long argc, t_atom *argv);
 void filterbank_bandwidths(t_filterbank *x, t_symbol *s, long argc, t_atom *argv);
 void filterbank_level(t_filterbank *x, double level);
+void filterbank_num(t_filterbank *x, int num);
 void filterbank_clear(t_filterbank *x);
 void filterbank_computeCoefs(t_filterbank *x);
 void filterbank_initParams(t_filterbank *x);
 double *filterbank_bpFilterbankStereo(struct BPFilter *filters, int size, t_double in);
-t_max_err filterbank_notify(t_filterbank *x, t_symbol *s, t_symbol *msg, void *sender, void *data);
 
 
 // global class pointer variable
@@ -70,13 +70,13 @@ void ext_main(void *r)
 	//
 	class_addmethod(c, (method)filterbank_dsp64, "dsp64",	A_CANT, 0);
 	class_addmethod(c, (method)filterbank_assist, "assist",	A_CANT, 0);
-	class_addmethod(c, (method)filterbank_notify, "notify", A_CANT, 0);
 	//
 	class_addmethod(c, (method)filterbank_freqs, "freqs", A_GIMME, 0);
 	class_addmethod(c, (method)filterbank_gains, "gains", A_GIMME, 0);
 	class_addmethod(c, (method)filterbank_pans, "pans", A_GIMME, 0);
 	class_addmethod(c, (method)filterbank_bandwidths, "bandwidths", A_GIMME, 0);
 	class_addmethod(c, (method)filterbank_level, "level", A_FLOAT, 0);
+	class_addmethod(c, (method)filterbank_num, "num", A_DEFLONG, 0);
 	class_addmethod(c, (method)filterbank_clear, "clear", A_GIMME, 0);
 	//
 	CLASS_ATTR_LONG(c, "num", 0, t_filterbank, numFilters);
@@ -117,18 +117,26 @@ void *filterbank_new(t_symbol *s, long argc, t_atom *argv)
 		object_attach_byptr_register(x, x, CLASS_BOX);
 		//Get samplerate
 		x->samplerate = sys_getsr();
-		x->numFiltersActive = 0;
+		//Init Values
+		x->maxFilters = 16;
+		x->numFilters = 1;
+		x->level = 1;
 		//Check for arguments
-		if (atom_getlong(argv))
-			x->numFilters = max( atom_getlong(argv), 0);
-		else
-			x->numFilters = 1;
-		if (atom_getfloat(++argv))
-			x->level = max( atom_getlong(argv), 0);
-		else
-			x->level = 1;
+		for (int i = 0; i < argc; i++) {
+			switch(i) {
+				case 0:
+					x->maxFilters = max( atom_getlong(argv), 1);
+					break;
+				case 1:
+					x->numFilters = max( atom_getlong(argv), 1);
+					break;
+				case 2:
+					x->level = max( atom_getfloat(argv), 0);
+					break;
+			}
+		}
 		//Allocate memory for filterbank
-		x->filterbank = (struct BPFilter *)malloc(x->numFilters * sizeof(struct BPFilter));
+		x->filterbank = (struct BPFilter *)malloc(x->maxFilters * sizeof(struct BPFilter));
 		//Initialize parameter values
 		filterbank_initParams(x);
 	}
@@ -168,45 +176,25 @@ void filterbank_assist(t_filterbank *x, void *b, long m, long a, char *s)
 
 
 
-//Notify (Changed attributes)
-t_max_err filterbank_notify(t_filterbank *x, t_symbol *s, t_symbol *msg, void *sender, void *data)
-{
-    t_symbol *attrname;
-    if (msg == gensym("attr_modified")) {   // Check notification type
-        attrname = (t_symbol *)object_method((t_object *)data, gensym("getname")); // ask attribute object for name
-        
-        //Number of filters changed
-        if (attrname == gensym("num")) {
-			//Reallocate memory for array of bandpass
-			x->filterbank = (struct BPFilter *)realloc(x->filterbank, x->numFilters * sizeof(struct BPFilter));
-			//Initialize parameter values that are empty
-			filterbank_initParams(x);
-        }
-        //
-
-    }
-    return 0;
-}
-
-
 //Initialize empty parameter values
 void filterbank_initParams(t_filterbank *x) 
 {
-	int size = x->numFilters;
+	int size = x->maxFilters;
     struct BPFilter *filters = x->filterbank;
     for (int i = 0; i < size; i++) {
     	//Determine if value previously set, if not use previous filter's parameters
-    	if (!filters[i].centerFreq)
-    		filters[i].centerFreq = !i? 1000 : filters[i - 1].centerFreq;
-    	if (!filters[i].gain)
-    		filters[i].gain = !i? 1 : filters[i - 1].gain;
-    	if (!filters[i].pan)
-    		filters[i].pan = !i? 0.5 : filters[i - 1].pan;
-    	if (!filters[i].bandwidth)
-    		filters[i].bandwidth = !i? 1 : filters[i - 1].bandwidth;
+    	filters[i].centerFreq = 1000;
+    	filters[i].gain = 1;
+    	filters[i].pan = 0.5;
+    	filters[i].bandwidth = 1;
     }
     filterbank_computeCoefs(x);
-    x->numFiltersActive = x->numFilters;
+}
+
+
+//Number of filters
+void filterbank_num(t_filterbank *x, int num) {
+	x->numFilters = min( max(num, 1), x->maxFilters);
 }
 
 
@@ -318,7 +306,7 @@ void filterbank_perform64(t_filterbank *x, t_object *dsp64, double **ins, long n
 
 	while (sampleframes--) {
 		//Filterbank input
-		outX = filterbank_bpFilterbankStereo(x->filterbank, x->numFiltersActive, *in++);
+		outX = filterbank_bpFilterbankStereo(x->filterbank, x->numFilters, *in++);
 		*outL++ = *outX++ * x->level;
 		*outR++ = *outX * x->level;
 	}

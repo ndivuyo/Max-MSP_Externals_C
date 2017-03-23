@@ -20,8 +20,8 @@
 const int NUM_COEFS = 4;
 
 
-//Bandpass Filter
-struct BPFilter {
+//Bandpass Biquad Filter
+struct QuadFilter {
 	double x1, x2, y1, y2;
 	double coefs[NUM_COEFS];
 };
@@ -31,8 +31,7 @@ struct BPFilter {
 struct BandParams {
 	double freq, bw, gain, pan;
 	double envY, envStart, envDiff;
-	long envCount, delayCount;
-	double *delayHistory;
+	long envCount;
 };
 
 
@@ -40,18 +39,17 @@ struct BandParams {
 typedef struct _vocoder {
 	t_pxobject ob;
 	double samplerate;
+	int gate;
 	struct BandParams *bandParams;	//Parameter values for each band (set of mod and carrier filterbanks)
 	//Filter variables:
-	int numBands;					//ATTR: “nums”
-	struct BPFilter *modFB;
-	struct BPFilter *carrFB;
+	int maxBands, numBands;
+	struct QuadFilter *modFB;
+	struct QuadFilter *carrFB;
 	//Envelope Follower variables:
 	long envAttack, envRelease;
-	int sendEnvList;				//Attr: "envelopeDisplay"
+	int sendEnvList, envIsLog;
 	t_atom *envList;
 	void *envList_outlet;
-	//Sample Delay variables:
-	long delayTime, delayCount, maxDelay;
 } t_vocoder;
 
 
@@ -60,29 +58,29 @@ void *vocoder_new(t_symbol *s, long argc, t_atom *argv);
 void vocoder_free(t_vocoder *x);
 void vocoder_assist(t_vocoder *x, void *b, long m, long a, char *s);
 //Messages
+void vocoder_numBands(t_vocoder *x, int num);
 void vocoder_freqs(t_vocoder *x, t_symbol *s, long argc, t_atom *argv);
 void vocoder_bandwidths(t_vocoder *x, t_symbol *s, long argc, t_atom *argv);
 void vocoder_gains(t_vocoder *x, t_symbol *s, long argc, t_atom *argv);
 void vocoder_pans(t_vocoder *x, t_symbol *s, long argc, t_atom *argv);
 void vocoder_envelope(t_vocoder *x, t_symbol *s, long argc, t_atom *argv);
-void vocoder_outputEnvelopes(t_vocoder *x, long state);
-void vocoder_delayTime(t_vocoder *x, long delayTime);
+void vocoder_envIsLog(t_vocoder *x, int state);
+void vocoder_outputEnvelopes(t_vocoder *x, int state);
 void vocoder_clear(t_vocoder *x);
-t_max_err vocoder_notify(t_vocoder *x, t_symbol *s, t_symbol *msg, void *sender, void *data);
 //Internal
-void vocoder_numBands(t_vocoder *x);
+double atom_getlfdouble(t_atom *v);
 void vocoder_initNullParams(t_vocoder *x);
-void vocoder_computeAllCoefs(t_vocoder *x);
-void vocoder_computeCoefs(int bands, double samplerate, struct BPFilter *fb, struct BandParams *params);
-void vocoder_phaseDelays(t_vocoder *x);
+void vocoder_computeAllBPCoefs(t_vocoder *x);
+void vocoder_computeBPCoefs(int bands, double samplerate, struct QuadFilter *fb, struct BandParams *params);
 void vocoder_envListOut(void *outlet, int size, t_atom *envList);
 //DSP
 void vocoder_dsp64(t_vocoder *x, t_object *dsp64, short *count, double samplerate, long maxvectorsize, long flags);
 void vocoder_perform64(t_vocoder *x, t_object *dsp64, double **ins, long numins, double **outs, long numouts, long sampleframes, long flags, void *userparam);
 double *vocoder_vocoder(t_vocoder *x, t_double modSig, t_double carrSig, long frame);
-double vocoder_bpf(struct BPFilter *filter, t_double in);
-double vocoder_envelopeFollow(double in, long attack, long release, struct BandParams *params, long frame);
-double vocoder_delay(double in, long delayTime, double *history, long delayCount);
+double vocoder_biquad(struct QuadFilter *filter, t_double in);
+double vocoder_envelopeFollow(double in, long attack, long release, int isLog, struct BandParams *params, long frame);
+
+
 
 // global class pointer variable
 static t_class *vocoder_class = NULL;
@@ -93,25 +91,23 @@ static t_class *vocoder_class = NULL;
 
 
 
-//Main
+//Init Routine
 void ext_main(void *r)
 {
-	t_class *c = class_new("db.vocoder~", (method)vocoder_new, (method)dsp_free, (long)sizeof(t_vocoder), 0L, A_GIMME, 0);
+	t_class *c = class_new("db.vocoder~", (method)vocoder_new, (method)vocoder_free, (long)sizeof(t_vocoder), 0L, A_GIMME, 0);
 	//
 	class_addmethod(c, (method)vocoder_dsp64, "dsp64",	A_CANT, 0);
 	class_addmethod(c, (method)vocoder_assist, "assist",	A_CANT, 0);
 	//
-	class_addmethod(c, (method)vocoder_notify, "notify", A_CANT, 0);
+	class_addmethod(c, (method)vocoder_numBands, "num", A_DEFLONG, 0);
 	class_addmethod(c, (method)vocoder_freqs, "freqs", A_GIMME, 0);
 	class_addmethod(c, (method)vocoder_bandwidths, "bandwidths", A_GIMME, 0);
 	class_addmethod(c, (method)vocoder_gains, "gains", A_GIMME, 0);
 	class_addmethod(c, (method)vocoder_pans, "pans", A_GIMME, 0);
 	class_addmethod(c, (method)vocoder_envelope, "envelope", A_GIMME, 0);
-	class_addmethod(c, (method)vocoder_outputEnvelopes, "outputEnvelopes", A_DEFLONG, 0);
-	class_addmethod(c, (method)vocoder_delayTime, "delay", A_DEFLONG, 0);
+	class_addmethod(c, (method)vocoder_envIsLog, "logenvelopes", A_DEFLONG, 0);
+	class_addmethod(c, (method)vocoder_outputEnvelopes, "envelopesout", A_DEFLONG, 0);
 	class_addmethod(c, (method)vocoder_clear, "clear", A_GIMME, 0);
-	//
-	CLASS_ATTR_LONG(c, "num", 0, t_vocoder, numBands);
 	//
 	class_dspinit(c);
 	class_register(CLASS_BOX, c);
@@ -142,35 +138,24 @@ void *vocoder_new(t_symbol *s, long argc, t_atom *argv)
 	if (x) {
 		//
 		dsp_setup((t_pxobject *)x, 2);
-		//Register object (attach to itsself) so get attr notifications
-		object_attach_byptr_register(x, x, CLASS_BOX);
 		//Outlets
 		x->envList_outlet = outlet_new((t_object *)x, NULL);
 		outlet_new((t_pxobject *)x, "signal");
 		outlet_new((t_pxobject *)x, "signal");
 		//Initialize parameters
 		x->samplerate = sys_getsr();
-		x->numBands = 4;
+		x->gate = 0;
 		x->envAttack = 10;
 		x->envRelease = 1000;
 		x->sendEnvList = 0;
-		x->maxDelay = x->samplerate;
-		x->delayTime = 1;
-		//Check for arguments
-		for (int i = 0; i < argc; i++) {
-			switch(i) {
-				case 0:
-					x->numBands = max( atom_getlong(argv), 1);
-					break;
-				case 1:
-					x->envAttack = max( atom_getlong(argv), 1);
-					break;
-				case 2:
-					x->envRelease = max( atom_getlong(argv), 1);
-					break;
-			}
-		}
+		//args
+		atom_arg_getlong(&x->maxBands, 0, argc, argv);
+		x->maxBands = max( x->maxBands, 1);
+		atom_arg_getlong(&x->numBands, 1, argc, argv);
+		x->numBands = min( max(x->numBands, 1), x->maxBands);
 	}
+	//Initialize empty parameters and pointers
+	vocoder_initNullParams(x);
 	return (x);
 }
 
@@ -178,7 +163,7 @@ void *vocoder_new(t_symbol *s, long argc, t_atom *argv)
 //free
 void vocoder_free(t_vocoder *x)
 {
-	free(x->delayHistory);
+	dsp_free((t_pxobject *)x);
 	free(x->envList);
 	free(x->bandParams);
 	free(x->modFB);
@@ -192,21 +177,22 @@ void vocoder_assist(t_vocoder *x, void *b, long m, long a, char *s)
 	if (m == ASSIST_INLET) {
 		switch (a) {
 		case 0:
-			sprintf(s,"(Signal / Messages) Modulator");
+			sprintf(s,"(signal) Modulator");
 			break;
 		case 1:
-			sprintf(s,"(Signal) Carrier");
-			break;
+			sprintf(s,"(signal) Carrier");
 		}
 	}
 	else {
 		switch (a) {
 		case 0:
-			sprintf(s,"(Signal) Vocoder Left");
+			sprintf(s,"(signal) Vocoder Left");
 			break;
 		case 1:
-			sprintf(s,"(Signal) Vocoder Right");
+			sprintf(s,"(signal) Vocoder Right");
 			break;
+		case 2:
+			sprintf(s,"(list) Modulator Envelopes");
 		}
 	}
 }
@@ -217,16 +203,22 @@ void vocoder_assist(t_vocoder *x, void *b, long m, long a, char *s)
 
 
 
+//Update the number of bands
+void vocoder_numBands(t_vocoder *x, int num)
+{
+	x->numBands = min( max(num, 1), x->maxBands);
+}
+
+
 //Update Center frequencies for filterbanks
 void vocoder_freqs(t_vocoder *x, t_symbol *s, long argc, t_atom *argv)
 {
 	int size = (argc < x->numBands)? argc : x->numBands;
-	t_atom *args = argv;
     struct BandParams *bands = x->bandParams;
-    for (int i = 0; i < size; i++, args++) {
-    	bands[i].freq = max( min(atom_getfloat(args), x->samplerate / 2), 20 );
+    for (int i = 0; i < size; i++, argv++) {
+    	bands[i].freq = max( min(atom_getlfdouble(argv), x->samplerate / 2), 20 );
     }
-    vocoder_computeAllCoefs(x);
+    vocoder_computeAllBPCoefs(x);
 }
 
 
@@ -234,19 +226,18 @@ void vocoder_freqs(t_vocoder *x, t_symbol *s, long argc, t_atom *argv)
 void vocoder_bandwidths(t_vocoder *x, t_symbol *s, long argc, t_atom *argv)
 {
 	int size = (argc < x->numBands)? argc : x->numBands;
-	t_atom *args = argv;
     struct BandParams *bands = x->bandParams;
     //If only one argument, then change all values to it
     if (size == 1) {
     	for (int i = 0; i < x->numBands; i++) {
-	    	bands[i].bw = max(atom_getfloat(args), 0.0001);
+	    	bands[i].bw = max(atom_getlfdouble(argv), 0.0001);
 	    }
     } else {
-	    for (int i = 0; i < size; i++, args++) {
-	    	bands[i].bw = max(atom_getfloat(args), 0.0001);
+	    for (int i = 0; i < size; i++, argv++) {
+	    	bands[i].bw = max(atom_getlfdouble(argv), 0.0001);
 	    }
 	}
-    vocoder_computeAllCoefs(x);
+    vocoder_computeAllBPCoefs(x);
 }
 
 
@@ -254,16 +245,15 @@ void vocoder_bandwidths(t_vocoder *x, t_symbol *s, long argc, t_atom *argv)
 void vocoder_gains(t_vocoder *x, t_symbol *s, long argc, t_atom *argv)
 {
 	int size = (argc < x->numBands)? argc : x->numBands;
-	t_atom *args = argv;
     struct BandParams *bands = x->bandParams;
     //If only one argument, then change all values to it
     if (size == 1) {
     	for (int i = 0; i < x->numBands; i++) {
-    		bands[i].gain = atom_getfloat(args);
+    		bands[i].gain = atom_getlfdouble(argv);
     	}
     } else {
-	    for (int i = 0; i < size; i++, args++) {
-	    	bands[i].gain = atom_getfloat(args);
+	    for (int i = 0; i < size; i++, argv++) {
+	    	bands[i].gain = atom_getlfdouble(argv);
 	    }
 	}
 }
@@ -273,10 +263,9 @@ void vocoder_gains(t_vocoder *x, t_symbol *s, long argc, t_atom *argv)
 void vocoder_pans(t_vocoder *x, t_symbol *s, long argc, t_atom *argv)
 {
 	int size = (argc < x->numBands)? argc : x->numBands;
-	t_atom *args = argv;
     struct BandParams *bands = x->bandParams;
-    for (int i = 0; i < size; i++, args++) {
-    	bands[i].pan = atom_getfloat(args);
+    for (int i = 0; i < size; i++, argv++) {
+    	bands[i].pan = atom_getlfdouble(argv);
     }
 }
 
@@ -284,46 +273,39 @@ void vocoder_pans(t_vocoder *x, t_symbol *s, long argc, t_atom *argv)
 //Set attack and release times in samples for envelope follower
 void vocoder_envelope(t_vocoder *x, t_symbol *s, long argc, t_atom *argv)
 {
-	x->envAttack = max( atom_getlong(argv++), 1);
-	x->envRelease = max( atom_getlong(argv), 1);
+	x->envAttack = max( atom_getlfdouble(argv++), 1);
+	x->envRelease = max( atom_getlfdouble(argv), 1);
+}
+
+
+//Choose envelope following to be logrithmic or not
+void vocoder_envIsLog(t_vocoder *x, int state)
+{
+	x->envIsLog = min( max(state, 0), 1 );
 }
 
 
 //Booelean whether or not to send out envelope values list
-void vocoder_outputEnvelopes(t_vocoder *x, long state) 
+void vocoder_outputEnvelopes(t_vocoder *x, int state) 
 {
 	x->sendEnvList = max( min(state, 1), 0);
-}
-
-
-//Set delay time in samples
-void vocoder_delayTime(t_vocoder *x, long delayTime)
-{
-	x->delayTime = max( min(delayTime, x->maxDelay - 1), 0) + 1;
-	vocoder_phaseDelays(x);
 }
 
 
 //Clear bandpass filter delay histories
 void vocoder_clear(t_vocoder *x)
 {
-
-}
-
-
-//
-t_max_err vocoder_notify(t_vocoder *x, t_symbol *s, t_symbol *msg, void *sender, void *data)
-{
-	t_symbol *attrname;
-    if (msg == gensym("attr_modified")) {   // Check notification type
-        attrname = (t_symbol *)object_method((t_object *)data, gensym("getname")); // ask attribute object for name
-        //Number of filters changed
-        if (attrname == gensym("num")) {
-			vocoder_numBands(x);
-        }
-        //
+	int size = x->maxBands;
+	struct QuadFilter *mFB = x->modFB;
+	struct QuadFilter *cFB = x->carrFB;
+    for (int i = 0; i < size; i++) {
+    	mFB[i].x1 = mFB[i].x2 = mFB[i].y1 = mFB[i].y2 = 0;
+    	cFB[i].x1 = cFB[i].x2 = cFB[i].y1 = cFB[i].y2 = 0;
     }
-    return 0;
+    //Briefly cut release
+    long temp = x->envRelease;
+    x->envRelease = 1;
+    x->envRelease = temp;
 }
 
 
@@ -332,80 +314,62 @@ t_max_err vocoder_notify(t_vocoder *x, t_symbol *s, t_symbol *msg, void *sender,
 
 
 
-//Change the number of bands
-void vocoder_numBands(t_vocoder *x)
+//Get a double from a long or float atom
+double atom_getlfdouble(t_atom *v)
 {
-	//Value check
-	x->numBands = max(x->numBands, 1);
-	double size = x->numBands;
-	//Initialize or resize
-	if (x->bandParams)
-		x->bandParams = (struct BandParams *)sysmem_resizeptr((struct BandParams *)x->bandParams, size * sizeof(struct BandParams));
-	else
-		x->bandParams = (struct BandParams *)sysmem_newptr(size * sizeof(struct BandParams));
-	if (x->modFB)
-		x->modFB = (struct BPFilter *)sysmem_resizeptr((struct BPFilter *)x->modFB, size * sizeof(struct BPFilter));
-	else
-		x->modFB = (struct BPFilter *)sysmem_newptr(size * sizeof(struct BPFilter));
-	if (x->carrFB)
-		x->carrFB = (struct BPFilter *)sysmem_resizeptr((struct BPFilter *)x->carrFB, size * sizeof(struct BPFilter));
-	else
-		x->carrFB = (struct BPFilter *)sysmem_newptr(size * sizeof(struct BPFilter));
-	if (x->envList)
-		x->envList = (t_atom *)sysmem_resizeptr((t_atom *)x->envList, size * sizeof(t_atom));
-	else
-		x->envList = (t_atom *)sysmem_newptr(size * sizeof(t_atom));
-	//Initialize parameter values that are empty
-	vocoder_initNullParams(x);
+	double r = 0;
+	switch( atom_gettype(v) ) {
+		case A_LONG:
+			r = atom_getlong(v);
+			break;
+		case A_FLOAT:
+			r = atom_getfloat(v);
+			break;
+	}
+	return r;
 }
 
 
-//Initialize null parameters
+//Initialize empty parameters and pointers
 void vocoder_initNullParams(t_vocoder *x)
 {
-	int size = x->numBands;
+	int size = x->maxBands;
+	x->bandParams = (struct BandParams *)malloc(size * sizeof(struct BandParams));
+	x->modFB = (struct QuadFilter *)malloc(size * sizeof(struct QuadFilter));
+	x->carrFB = (struct QuadFilter *)malloc(size * sizeof(struct QuadFilter));
+	x->envList = (t_atom *)malloc(size * sizeof(t_atom));
     struct BandParams *params = x->bandParams;
     for (int i = 0; i < size; i++) {
-    	//Determine if value previously set, if not use previous filter's parameters
-    	if (!params[i].freq)
-    		params[i].freq = !i? 1000 : params[i - 1].freq;
-    	if (!params[i].gain)
-    		params[i].gain = !i? 1 : params[i - 1].gain;
-    	if (!params[i].pan)
-    		params[i].pan = !i? 0.5 : params[i - 1].pan;
-    	if (!params[i].bw)
-    		params[i].bw = !i? 1 : params[i - 1].bw;
-    	if (!params[i].envY)
-    		params[i].envY = 0;
-    	if (!params[i].envStart) {
-    		params[i].envStart = 0;
-    		params[i].envCount = 0;
-    		params[i].envDiff = 0;
-    	}
-    	if (!params[i].delayHistory)
-    		params[i].delayHistory = (double *)sysmem_newptr(x->maxDelay * sizeof(double));
+    	params[i].freq = 1000;
+    	params[i].gain = 1;
+    	params[i].pan = 0.5;
+    	params[i].bw = 1;
+    	params[i].envY = 0;
+    	params[i].envStart = 0;
+    	params[i].envCount = 0;
+    	params[i].envDiff = 0;
     }
     //Compute filter coefficients
-    vocoder_computeAllCoefs(x);
-    //Phase individual band delays
-    vocoder_phaseDelays(x);
+    vocoder_computeAllBPCoefs(x);
+    //Open audio gate
+    x->gate = 1;
 }
 
 
 //Convert coefficients for all filterbanks
-void vocoder_computeAllCoefs(t_vocoder *x)
+void vocoder_computeAllBPCoefs(t_vocoder *x)
 {
-	vocoder_computeCoefs(x->numBands, x->samplerate, x->modFB, x->bandParams);
-	vocoder_computeCoefs(x->numBands, x->samplerate, x->carrFB, x->bandParams);
+	vocoder_computeBPCoefs(x->numBands, x->samplerate, x->modFB, x->bandParams);
+	vocoder_computeBPCoefs(x->numBands, x->samplerate, x->carrFB, x->bandParams);
 }
 
 
-//Convert center frequency and bandwidth to coefficients for each filter in a filterbank
-void vocoder_computeCoefs(int bands, double samplerate, struct BPFilter *fb, struct BandParams *params)
+//Convert center frequency and bandwidth to coefficients for each filter in a filterbank as bandpass filters
+void vocoder_computeBPCoefs(int bands, double samplerate, struct QuadFilter *fb, struct BandParams *params)
 {
 	for (int i = 0; i < bands; i++) {
 		//Conversions
-		double w = 2 * acos(-1) * params[i].freq / samplerate;
+		double w = 2 * PI * params[i].freq / samplerate;
 		double a = sin(w) * sinh( (log(2) / 2) * params[i].bw * (w / sin(w)) );
 		double a0 = 1 + a;
 		double *coefs = fb[i].coefs;
@@ -414,17 +378,6 @@ void vocoder_computeCoefs(int bands, double samplerate, struct BPFilter *fb, str
 		*(coefs + 2) = -2 * cos(w) / a0;
 		*(coefs + 3) = (1 - a) / a0;
 	}
-}
-
-
-//Phase delays for bands based on index and delay time
-void vocoder_phaseDelays(t_vocoder *x) {
-	int size = x->numBands;
-	struct BandParams *params = x->bandParams;
-	for (int i = 0; i < size; i++) {
-		params[i].delayTime = (i + 1) / size * x->delayTime;
-	}
-	x->delayCount = 0;
 }
 
 
@@ -444,6 +397,8 @@ void vocoder_envListOut(void *outlet, int size, t_atom *envList)
 void vocoder_dsp64(t_vocoder *x, t_object *dsp64, short *count, double samplerate, long maxvectorsize, long flags)
 {
 	object_method(dsp64, gensym("dsp_add64"), x, vocoder_perform64, 0, NULL);
+	//Init sample histories
+	vocoder_clear(x);
 }
 
 
@@ -456,14 +411,16 @@ void vocoder_perform64(t_vocoder *x, t_object *dsp64, double **ins, long numins,
 	t_double *outL = outs[0];		//Left out
 	t_double *outR = outs[1];		//Right Out
 	double *outX;					//Multi Out Array
-
-	//Iterate through samples
-	while (sampleframes--) {
-		//Apply vocoder
-		outX = vocoder_vocoder(x, *modSig++, *carrSig++, sampleframes);
-		//Output samples
-		*outL++ = *outX++;
-		*outR++ = *outX;
+	//Gate to prevent audio output at certain times
+	if (x->gate) {
+		//Iterate through samples
+		while (sampleframes--) {
+			//Apply vocoder
+			outX = vocoder_vocoder(x, *modSig++, *carrSig++, sampleframes);
+			//Output samples
+			*outL++ = *outX++;
+			*outR++ = *outX;
+		}
 	}
 }
 
@@ -478,35 +435,34 @@ double *vocoder_vocoder(t_vocoder *x, t_double modSig, t_double carrSig, long fr
 	//Loop through all bands
 	for (int i = 0; i < bands; i++) 
 	{
-		//BPFilter carrier and modulator
-		double carrier = vocoder_bpf(&x->carrFB[i], carrSig);
-		double modulator = vocoder_bpf(&x->modFB[i], modSig);
-		//Get a delayed modulator sample
-		modulator = vocoder_delay(modulator, params[i].delayTime, params[i].delayHistory, x->delayCount);
+		//QuadFilter carrier and modulator
+		double carrier = vocoder_biquad(&x->carrFB[i], carrSig);
+		double modulator = vocoder_biquad(&x->modFB[i], modSig);
 		//Envelope follow modulator
-		modulator = vocoder_envelopeFollow(modulator, x->envAttack, x->envRelease, &params[i], frame);
+		modulator = vocoder_envelopeFollow(modulator, x->envAttack, x->envRelease, x->envIsLog, &params[i], frame);
+		//Apply gain
+		modulator *= params[i].gain;
 		if (x->sendEnvList)
 			atom_setfloat(&x->envList[i], modulator);
-		//Apply modulator to carrier with gain
-		carrier = carrier * modulator * params[i].gain;
+		//Apply modulator to carrier
+		carrier = carrier * modulator;
 		//Panning
 		sums[0] += carrier * (1 - params[i].pan);
 		sums[1] += carrier * params[i].pan;
 	}
-	//Increase delay counting
-	x->delayCount++;
 	//Optionally Send out list of envelope values
 	if (x->sendEnvList)
 		vocoder_envListOut(x->envList_outlet, bands, x->envList);
 	//Gain adjustment
 	sums[0] *= (1 / sqrt(bands));
 	sums[1] *= (1 / sqrt(bands));
+	//
 	return sums;
 }
 
 
-//Bandpass Filter a signal
-double vocoder_bpf(struct BPFilter *filter, t_double in)
+//Biquad BandpassFilter a signal
+double vocoder_biquad(struct QuadFilter *filter, t_double in)
 {
 	double *coefs = filter->coefs;
 	double yTemp = filter->y1;
@@ -531,7 +487,7 @@ double vocoder_bpf(struct BPFilter *filter, t_double in)
 
 
 //Envelope follow a signal logrithmically
-double vocoder_envelopeFollow(double in, long attack, long release, struct BandParams *params, long frame)
+double vocoder_envelopeFollow(double in, long attack, long release, int isLog, struct BandParams *params, long frame)
 {
 	double *start = &params->envStart;
 	double *diff = &params->envDiff;
@@ -547,16 +503,8 @@ double vocoder_envelopeFollow(double in, long attack, long release, struct BandP
 	//Logrithmic ramp to new value
 	double phase = (*count)++;
 	phase /= (*diff > 0)? attack : release;
-	phase = log10(phase * 10 + 1);
+	if (isLog)
+		phase = log10(phase * 10 + 1);
 	*envY = *start + *diff * min(phase, 1);
 	return *envY;
-}
-
-
-//Store a sample for delay
-double vocoder_delay(double in, long delayTime, double *history, long delayCount)
-{
-	history[delayCount % delayTime] = in;
-	double grab = history[delayCount % delayTime + 1];
-	return (!grab)? 0 : grab;
 }
